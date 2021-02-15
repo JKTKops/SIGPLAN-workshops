@@ -64,7 +64,7 @@ interp exp = case check [] exp of
     -- interp' term@Lam{} = term
     interp' (App f x) env = case interp' f env of
       Lam clenv (name, _) body ->
-        interp' body ((name, interp' x env):clenv++env)
+        interp' body ((name, interp' x env):clenv)
 
 --------------------------------------------------------------------------------------
 --
