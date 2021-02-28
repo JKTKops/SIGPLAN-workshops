@@ -19,15 +19,15 @@ data Statement
 
 data Exp
   = ConstExp Const
-  | VarExp String
+  | VarExp   String
   deriving (Eq, Show)
 
 data Const
-  = IntConst   Integer
-  | FloatConst Double
-  | BoolConst  Bool
+  = IntConst    Integer
+  | FloatConst  Double
+  | BoolConst   Bool
+  | StringConst String
   | UnitConst
-  -- add StringConst if we have time, harder to parse
   -- leave off NilConst (and SAY we're leaving it off)
   --   because typechecking it requires tyvars
   deriving (Eq, Show)
@@ -37,9 +37,10 @@ data Type
   deriving (Eq, Show)
 
 data Val
-  = IntVal Integer
-  | FloatVal Double
-  | BoolVal  Bool
+  = IntVal    Integer
+  | FloatVal  Double
+  | BoolVal   Bool
+  | StringVal String
   | UnitVal
   deriving (Eq, Show)
 
@@ -102,6 +103,7 @@ parseConst = (string "true" $> BoolConst True)
              <|> (string "false" $> BoolConst False)
              <|> (string "()" $> UnitConst)
              <|> parseNumber
+             <|> parseString
 
 parseVar :: Parser Exp
 parseVar = VarExp <$> parseName
@@ -116,6 +118,19 @@ parseNumber = do
                  read $ integerPart ++ "." ++ d ++ "0"
                  -- so we get 2.50, more importantly "2." => 2.0
 
+parseString :: Parser Const
+parseString = StringConst <$> between (char '"') (char '"') parseStringContents
+
+parseStringContents :: Parser String
+parseStringContents = many $ noneOf ['"', '\\'] <|> parseEscapeChar
+  where
+    parseEscapeChar = do
+      character <- char '\\' >> oneOf ['"', '\\', 't']
+      return $ case character of
+        '"' -> '"'
+        '\\' -> '\\'
+        't'  -> '\t'
+
 --------------------------------------------------------------------------------------
 --
 -- Type-checking
@@ -126,12 +141,15 @@ parseNumber = do
 -- almost nothing to do.
 
 typecheck :: Exp -> Gamma -> Maybe Type
-typecheck (ConstExp c) _ = Just $ TyConst $ case c of
-  IntConst{}   -> "int"
-  FloatConst{} -> "float"
-  BoolConst{}  -> "bool"
-  UnitConst{}  -> "unit"
+typecheck (ConstExp c) _      = Just $ typeof c
 typecheck (VarExp name) gamma = lookupEnv gamma name
+
+typeof :: Const -> Type
+typeof IntConst{}    = TyConst "int"
+typeof FloatConst{}  = TyConst "float"
+typeof BoolConst{}   = TyConst "bool"
+typeof StringConst{} = TyConst "string"
+typeof UnitConst{}   = TyConst "unit"
 
 --------------------------------------------------------------------------------------
 --
@@ -139,13 +157,14 @@ typecheck (VarExp name) gamma = lookupEnv gamma name
 --
 --------------------------------------------------------------------------------------
 
-
 evaluate :: Exp -> Sigma -> Val
 evaluate (ConstExp c) env = case c of
-  IntConst i   -> IntVal i
-  FloatConst f -> FloatVal f
-  BoolConst b  -> BoolVal b
-  UnitConst    -> UnitVal
+  IntConst i    -> IntVal i
+  FloatConst f  -> FloatVal f
+  BoolConst b   -> BoolVal b
+  StringConst s -> StringVal s
+  UnitConst     -> UnitVal
+
 evaluate (VarExp name) env = case lookupEnv env name of
   Nothing -> error "evaluate VarExp: not in env (impossible!)"
   Just v  -> v

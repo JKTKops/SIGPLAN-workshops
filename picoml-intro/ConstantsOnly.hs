@@ -19,8 +19,8 @@ data Const
   = IntConst   Integer
   | FloatConst Double
   | BoolConst  Bool
+  | StringConst String
   | UnitConst
-  -- add StringConst if we have time, harder to parse
   -- leave off NilConst (and SAY we're leaving it off)
   --   because typechecking it requires tyvars
   deriving (Eq, Show)
@@ -33,6 +33,7 @@ data Val
   = IntVal Integer
   | FloatVal Double
   | BoolVal  Bool
+  | StringVal String
   | UnitVal
   deriving (Eq, Show)
 
@@ -55,6 +56,7 @@ parseConst = (string "true" $> BoolConst True)
              <|> (string "false" $> BoolConst False)
              <|> (string "()" $> UnitConst)
              <|> parseNumber
+             <|> parseString
 
 parseNumber :: Parser Const
 parseNumber = do
@@ -66,6 +68,19 @@ parseNumber = do
                  read $ integerPart ++ "." ++ d ++ "0"
                  -- so we get 2.50, more importantly "2." => 2.0
 
+parseString :: Parser Const
+parseString = StringConst <$> between (char '"') (char '"') parseStringContents
+
+parseStringContents :: Parser String
+parseStringContents = many $ noneOf ['"', '\\'] <|> parseEscapeChar
+  where
+    parseEscapeChar = do
+      character <- char '\\' >> oneOf ['"', '\\', 't']
+      return $ case character of
+        '"' -> '"'
+        '\\' -> '\\'
+        't'  -> '\t'
+
 --------------------------------------------------------------------------------------
 --
 -- Type-checking
@@ -76,11 +91,14 @@ parseNumber = do
 -- almost nothing to do.
 
 typecheck :: Exp -> Type
-typecheck (ConstExp c) = TyConst $ case c of
-  IntConst{}   -> "int"
-  FloatConst{} -> "float"
-  BoolConst{}  -> "bool"
-  UnitConst{}  -> "unit"
+typecheck (ConstExp c) = typeof c
+
+typeof :: Const -> Type
+typeof IntConst{}    = TyConst "int"
+typeof FloatConst{}  = TyConst "float"
+typeof BoolConst{}   = TyConst "bool"
+typeof StringConst{} = TyConst "string"
+typeof UnitConst{}   = TyConst "unit"
 
 --------------------------------------------------------------------------------------
 --
@@ -89,10 +107,12 @@ typecheck (ConstExp c) = TyConst $ case c of
 --------------------------------------------------------------------------------------
 
 evaluate :: Exp -> Val
-evaluate (ConstExp (IntConst i))   = IntVal i
-evaluate (ConstExp (FloatConst f)) = FloatVal f
-evaluate (ConstExp (BoolConst b))  = BoolVal b
-evaluate (ConstExp UnitConst)      = UnitVal
+evaluate (ConstExp c) = case c of
+    IntConst i    -> IntVal i
+    FloatConst f  -> FloatVal f
+    BoolConst b   -> BoolVal b
+    UnitConst     -> UnitVal
+    StringConst s -> StringVal s
 
 --------------------------------------------------------------------------------------
 --
