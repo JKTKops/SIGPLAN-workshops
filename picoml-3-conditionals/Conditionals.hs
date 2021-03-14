@@ -74,13 +74,11 @@ unionEnv = (++)
 
 picomlDef :: LanguageDef st
 picomlDef = emptyDef
-  { T.commentStart = "(*"
-  , T.commentEnd   = "*)"
-  , T.reservedOpNames = ["=", ";;"]
+  { T.reservedOpNames = ["=", ";;"]
   , T.reservedNames =
     [ "true", "false"
     , "let"
-    , "if", "else", "then"
+    , "if", "then", "else"
     ]
   }
 
@@ -105,7 +103,7 @@ whitespace = T.whiteSpace picoml
 
 -- this will evolve as we add to the interpreter
 parse :: String -> Either ParseError Statement
-parse = Parsec.parse (between whitespace eof parseStmt) "<interactive>"
+parse = Parsec.parse (whitespace *> parseStmt <* eof) "<interactive>"
 
 parseStmt :: Parser Statement
 parseStmt = do
@@ -128,7 +126,7 @@ parseExp :: Parser Exp
 parseExp = ConstExp <$> parseConst
            <|> parseVar
            <|> parseIf
-           <|> parens parseExp -- eventually parens parseAExp!
+           <|> parens parseExp
 
 parseConst :: Parser Const
 parseConst = (reserved "true" $> BoolConst True)
@@ -159,8 +157,6 @@ parseNumber = lexeme $ do
     Just d  -> return $ FloatConst $
                  read $ integerPart ++ "." ++ d ++ "0"
                  -- so we get 2.50, more importantly "2." => 2.0
-                 -- Parsec's 'float' parser doesn't do this, so we
-                 -- will keep doing it ourselves.
 
 parseString :: Parser Const
 parseString = StringConst <$> stringLiteral
@@ -174,17 +170,20 @@ parseString = StringConst <$> stringLiteral
 -- this section will get much more involved in the future, for now there's
 -- almost nothing to do.
 
-typecheck :: Exp -> Gamma -> Maybe Type
-typecheck (ConstExp c) _      = Just $ typeof c
-typecheck (VarExp name) gamma = lookupEnv gamma name
+typecheck :: Exp -> Gamma -> Either String Type
+typecheck (ConstExp c) _      = Right $ typeof c
+typecheck (VarExp name) gamma = case lookupEnv gamma name of
+  Just tau -> Right tau
+  Nothing  -> Left $ "variable name not in scope: " ++ name
 typecheck (IfExp e1 e2 e3) gamma = do
   t1 <- typecheck e1 gamma
   tau1 <- typecheck e2 gamma
   tau2 <- typecheck e3 gamma
   case t1 of
     TyConst "bool"
-      | tau1 == tau2 -> Just tau1
-    _ -> Nothing
+      | tau1 == tau2 -> Right tau1
+      | otherwise -> Left "cases of `if` have different types"
+    _ -> Left "condition of `if` is not a bool"
 
 typeof :: Const -> Type
 typeof IntConst{}    = TyConst "int"
@@ -235,28 +234,28 @@ replRead = do
 type Result = (Type, Val)
 type TopEnvs = (Sigma, Gamma)
 
-replEval :: Statement -> TopEnvs -> Maybe (Result, TopEnvs)
+replEval :: Statement -> TopEnvs -> Either String (Result, TopEnvs)
 replEval (AnonStmt e) envs@(sigma, gamma) =
   let mtau = typecheck e gamma
       v    = evaluate e sigma
   in case mtau of
-      Nothing  -> Nothing
-      Just tau -> Just ((tau, v), envs)
+      Left err -> Left err
+      Right tau -> Right ((tau, v), envs)
 replEval (LetStmt x e) (sigma, gamma) =
   let mtau = typecheck e gamma
       v   = evaluate e sigma
   in case mtau of
-      Nothing -> Nothing
-      Just tau -> let sigma' = insertEnv x v sigma
-                      gamma' = insertEnv x tau gamma
-                      envs' = (sigma', gamma')
-                  in Just ((tau, v), envs')
+      Left err -> Left err
+      Right tau -> let sigma' = insertEnv x v sigma
+                       gamma' = insertEnv x tau gamma
+                       envs' = (sigma', gamma')
+                   in Right ((tau, v), envs')
 
-replPretty :: Maybe Result -> String
-replPretty Nothing = "did not typecheck"
-replPretty (Just (ty, v)) = show v ++ " : " ++ show ty
+replPretty :: Either String Result -> String
+replPretty (Left err) = err
+replPretty (Right (ty, v)) = show v ++ " : " ++ show ty
 
-replPrint :: Maybe Result -> IO ()
+replPrint :: Either String Result -> IO ()
 replPrint = putStrLn . replPretty
 
 repl :: TopEnvs -> IO ()
@@ -265,7 +264,7 @@ repl envs = do
   case mstmt of
     Nothing -> return () -- done
     Just stmt -> case replEval stmt envs of
-      Nothing -> replPrint Nothing >> repl envs
-      Just (r, envs') -> replPrint (Just r) >> repl envs'
+      Left err -> replPrint (Left err) >> repl envs
+      Right (r, envs') -> replPrint (Right r) >> repl envs'
 
 main = repl ([], [])
