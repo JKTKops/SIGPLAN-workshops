@@ -3,6 +3,7 @@ module Polytypes where
 import Control.Applicative (liftA2)
 import Control.Monad.Except
 import Control.Monad.State
+import Control.Monad.Writer
 
 import Data.Functor (($>))
 import qualified Data.Set as S
@@ -187,78 +188,72 @@ parseList = brackets (pure()) $> NilConst -- for now
 ------------------------------
 -- Inferencing
 ------------------------------
-type Infer a = ExceptT String (State Int) a
+type Infer a = WriterT [Constraint]
+                 (ExceptT String
+                 (State Int)) a
   -- exercise: when generating names, generate strings instead of ints.
   -- make TyVar hold a string.
 
-runInfer :: Infer (Substitution, Monotype) -> Either String Polytype
-runInfer m = case evalState (runExceptT m) 0 of
-  Left e  -> Left e
-  Right r -> Right $ closeOver r
+type Constraint = (Monotype, Monotype)
 
+runInfer :: Infer Monotype -> Either String Polytype
+runInfer m = case evalState (runExceptT (runWriterT m)) 0 of
+  Left e  -> Left e
+  Right (r, cs) -> case solve cs of
+    Left e  -> Left e
+    Right s -> Right $ closeOver s r
+
+unify :: Monotype -> Monotype -> Infer ()
+unify t1 t2 = tell [(t1, t2)]
 
 -- Exp to infer, environment to infer in, and a "guess" for the type
 -- of the expression, which is really just a type variable that will
 -- be unified with the real type eventually.
-infer :: Exp -> Gamma -> Monotype -> Infer (Substitution, Monotype)
+infer :: Exp -> Gamma -> Infer Monotype
 
-infer (ConstExp c) _ tau = do
-  tau'  <- instantiate $ signature c
-  sigma <- unify tau tau'
-  return (sigma, tau)
+infer (ConstExp c) _ = instantiate $ signature c
 
-infer (VarExp name) gamma tau = case lookupEnv gamma name of
-  Just gx -> do
-    gx' <- instantiate gx
-    sigma <- unify tau gx'
-    return (sigma, tau)
+infer (VarExp name) gamma = case lookupEnv gamma name of
+  Just tau -> instantiate tau
   Nothing  -> throwError $ "variable name not in scope: " ++ name
 
-infer (IfExp e1 e2 e3) gamma tau = do
-  s1 <- gatherSubst e1 gamma boolType
-  s2 <- gatherSubst e2 (substGamma s1 gamma) (substMonotype s1 tau)
-  let s2os1 = s2 `compose` s1
-  s3 <- gatherSubst e3 (substGamma s2os1 gamma) (substMonotype s2os1 tau)
-  return (s3 `compose` s2os1, tau)
+infer (IfExp e1 e2 e3) gamma = do
+  beta <- infer e1 gamma
+  tau1 <- infer e2 gamma
+  tau2 <- infer e3 gamma
+  unify boolType beta
+  unify tau1 tau2
+  return tau1
 
-gatherSubst :: Exp -> Gamma -> Monotype -> Infer Substitution
-gatherSubst e g t = fst <$> infer e g t
-
-inferTop :: Exp -> Gamma -> Either String Polytype
-inferTop e g = runInfer $ do
-  tau <- fresh
-  infer e g tau
+inferTop e g = runInfer $ infer e g
 
 ------------------------------
 -- Unifying
 ------------------------------
 
-unify :: Monotype -> Monotype -> Infer Substitution
-unify t1 t2 = unifyMany [(t1, t2)]
-
-unifyMany :: [(Monotype, Monotype)] -> Infer Substitution
-unifyMany [] = return []
+solve :: [Constraint] -> Either String Substitution
+solve [] = return []
 -- delete
-unifyMany ((t1,t2):rest)
-  | t1 == t2 = unifyMany rest
+solve ((t1,t2):rest)
+  | t1 == t2 = solve rest
 -- eliminate
-unifyMany ((TyVar n, mt):rest)
+solve ((TyVar n, mt):rest)
   | occursCheck n mt = throwError $
     "can't construct infinite type " ++ show (TyVar n) ++ " ~ " ++ show mt
   | otherwise = do
-      phi <- unifyMany rest'
+      phi <- solve rest'
       return $ (n, substMonotype phi mt) : phi
   where rest' = map substBoth rest
         substBoth (t1, t2) = (subst t1, subst t2)
         subst = substMonotype [(n,mt)]
 -- orient
-unifyMany ((mt, TyVar n):rest) = unifyMany $ (TyVar n, mt) : rest
+solve ((mt, TyVar n):rest) = solve $ (TyVar n, mt) : rest
 -- decompose
-unifyMany ((ta@(TyConst a as), tb@(TyConst b bs)):rest)
-  | a == b = unifyMany (zip as bs ++ rest)
+solve ((ta@(TyConst a as), tb@(TyConst b bs)):rest)
+  | a == b = solve (zip as bs ++ rest)
   | otherwise = throwError $
     "Couldn't match expected type: " ++ show ta ++
-    "\n            With actual type: " ++ show tb
+    "\n            with actual type: " ++ show tb
 
 occursCheck :: TyVar -> Monotype -> Bool
 occursCheck ty mt = ty `S.member` monotypeFvs mt
@@ -323,8 +318,8 @@ fresh = do
   return $ TyVar counter
 
 -- turn monotype into polytype by quantifying the free variables
-closeOver :: (Substitution, Monotype) -> Polytype
-closeOver (s, mt) = generalize [] (substMonotype s mt)
+closeOver :: Substitution -> Monotype -> Polytype
+closeOver s mt = generalize [] (substMonotype s mt)
 
 generalize :: Gamma -> Monotype -> Polytype
 generalize gamma mt = Forall tvs mt
