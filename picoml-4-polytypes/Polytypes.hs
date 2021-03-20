@@ -198,18 +198,15 @@ type Infer a = WriterT [Constraint]
 type Constraint = (Monotype, Monotype)
 
 runInfer :: Infer Monotype -> Either String Polytype
-runInfer m = case evalState (runExceptT (runWriterT m)) 0 of
-  Left e  -> Left e
-  Right (r, cs) -> case solve cs of
-    Left e  -> Left e
-    Right s -> Right $ closeOver $ substMonotype s r
+runInfer m = do
+  (r, cs) <- evalState (runExceptT (runWriterT m)) 0
+  s       <- solve cs
+  return $ closeOver $ substMonotype s r
 
 unify :: Monotype -> Monotype -> Infer ()
 unify t1 t2 = tell [(t1, t2)]
 
--- Exp to infer, environment to infer in, and a "guess" for the type
--- of the expression, which is really just a type variable that will
--- be unified with the real type eventually.
+
 infer :: Exp -> Gamma -> Infer Monotype
 
 infer (ConstExp c) _ = instantiate $ signature c
