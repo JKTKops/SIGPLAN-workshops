@@ -6,6 +6,7 @@ import Control.Monad.State
 import Control.Monad.Writer
 
 import Data.Functor (($>))
+import Data.List (intercalate)
 import qualified Data.Set as S
 
 import Text.Parsec hiding (State, parse)
@@ -42,7 +43,7 @@ data Const
   deriving (Eq, Show)
 
 data Monotype
-  = TyConst String [Monotype]
+  = TyCon String [Monotype]
   | TyVar TyVar
   deriving (Eq, Show)
 
@@ -201,7 +202,7 @@ runInfer m = case evalState (runExceptT (runWriterT m)) 0 of
   Left e  -> Left e
   Right (r, cs) -> case solve cs of
     Left e  -> Left e
-    Right s -> Right $ closeOver s r
+    Right s -> Right $ closeOver $ substMonotype s r
 
 unify :: Monotype -> Monotype -> Infer ()
 unify t1 t2 = tell [(t1, t2)]
@@ -239,21 +240,28 @@ solve ((t1,t2):rest)
 -- eliminate
 solve ((TyVar n, mt):rest)
   | occursCheck n mt = throwError $
-    "can't construct infinite type " ++ show (TyVar n) ++ " ~ " ++ show mt
+    "can't construct infinite type "
+    ++ prettyType (TyVar n) ++ " ~ " ++ prettyType mt
   | otherwise = do
       phi <- solve rest'
       return $ (n, substMonotype phi mt) : phi
   where rest' = map substBoth rest
         substBoth (t1, t2) = (subst t1, subst t2)
         subst = substMonotype [(n,mt)]
+
+        tvScope = n : S.toList (monotypeFvs mt)
+        prettyType = prettyMonotypeWith tvScope
 -- orient
 solve ((mt, TyVar n):rest) = solve $ (TyVar n, mt) : rest
 -- decompose
-solve ((ta@(TyConst a as), tb@(TyConst b bs)):rest)
+solve ((ta@(TyCon a as), tb@(TyCon b bs)):rest)
   | a == b = solve (zip as bs ++ rest)
   | otherwise = throwError $
-    "Couldn't match expected type: " ++ show ta ++
-    "\n            with actual type: " ++ show tb
+    "Couldn't match expected type: " ++ prettyType ta ++
+    "\n            with actual type: " ++ prettyType tb
+  where
+    tvScope = S.toList $ monotypeFvs ta `S.union` monotypeFvs tb
+    prettyType = prettyMonotypeWith tvScope
 
 occursCheck :: TyVar -> Monotype -> Bool
 occursCheck ty mt = ty `S.member` monotypeFvs mt
@@ -284,7 +292,7 @@ substTyVar s n = case lookup n s of
 -- writing our own typeclasses.
 substMonotype :: Substitution -> Monotype -> Monotype
 substMonotype s (TyVar n) = substTyVar s n
-substMonotype s (TyConst name tys) = TyConst name $ map (substMonotype s) tys
+substMonotype s (TyCon name tys) = TyCon name $ map (substMonotype s) tys
 
 substPolytype :: Substitution -> Polytype -> Polytype
 substPolytype s (Forall tys mt) = Forall tys $ substMonotype s' mt
@@ -298,7 +306,7 @@ substGamma s g = map (\(n, ty) -> (n, substPolytype s ty)) g
 ------------------------------
 
 monotypeFvs :: Monotype -> S.Set TyVar
-monotypeFvs (TyConst _ tys) = S.unions $ map monotypeFvs tys
+monotypeFvs (TyCon _ tys) = S.unions $ map monotypeFvs tys
 monotypeFvs (TyVar n) = S.singleton n
 
 polytypeFvs :: Polytype -> S.Set TyVar
@@ -318,8 +326,8 @@ fresh = do
   return $ TyVar counter
 
 -- turn monotype into polytype by quantifying the free variables
-closeOver :: Substitution -> Monotype -> Polytype
-closeOver s mt = generalize [] (substMonotype s mt)
+closeOver :: Monotype -> Polytype
+closeOver mt = generalize [] mt
 
 generalize :: Gamma -> Monotype -> Polytype
 generalize gamma mt = Forall tvs mt
@@ -337,13 +345,13 @@ signature FloatConst{}  = Forall [] floatType
 signature BoolConst{}   = Forall [] boolType
 signature StringConst{} = Forall [] stringType
 signature UnitConst{}   = Forall [] unitType
-signature NilConst{}    = Forall [0] $ TyConst "[]" [TyVar 0]
+signature NilConst{}    = Forall [0] $ TyCon "list" [TyVar 0]
 
-intType    = TyConst "int" []
-floatType  = TyConst "float" []
-boolType   = TyConst "bool" []
-stringType = TyConst "string" []
-unitType   = TyConst "unit" []
+intType    = TyCon "int" []
+floatType  = TyCon "float" []
+boolType   = TyCon "bool" []
+stringType = TyCon "string" []
+unitType   = TyCon "unit" []
 
 --------------------------------------------------------------------------------------
 --
@@ -367,6 +375,59 @@ evaluate (VarExp name) env = case lookupEnv env name of
 evaluate (IfExp e1 e2 e3) env = case evaluate e1 env of
   BoolVal True  -> evaluate e2 env
   BoolVal False -> evaluate e3 env
+
+--------------------------------------------------------------------------------------
+--
+-- Prettier Printing
+--
+--------------------------------------------------------------------------------------
+
+prettyMonotypeWith :: [TyVar] -> Monotype -> String
+prettyMonotypeWith vars = pretty
+  where
+    pretty ty = case ty of
+      TyVar v        -> nameOf v
+      TyCon name []  -> name
+      TyCon name [t] -> unwords [pretty t, name]
+
+      TyCon "->" [t1,t2] -> unwords [pretty t1, "->", pretty t2]
+      TyCon name ts      -> "("
+                              ++ intercalate " * " (map pretty ts)
+                            ++ ") " ++ name
+
+    nameOf = assocNames vars
+
+prettyMonotype :: Monotype -> String
+prettyMonotype t = prettyMonotypeWith (S.toList $ monotypeFvs t) t
+
+prettyPolytype :: Polytype -> String
+prettyPolytype (Forall [] t) = prettyMonotype t
+prettyPolytype (Forall ts t) =
+  "∀" ++ intercalate "," (map nameOf ts)
+  ++ ". " ++ prettyMonotype t
+  where
+    nameOf = assocNames ts
+
+typeNames :: [String]
+typeNames = map ('\'':) $ [1..] >>= flip replicateM ['a'..'z']
+
+assocNames :: [TyVar] -> (TyVar -> String)
+assocNames vars = nameOf
+  where
+    nameAssocs = zip vars typeNames
+    nameOf i = case lookup i nameAssocs of
+      Nothing -> error "assocNames: bad visible type variable list"
+      Just name -> name
+
+prettyVal :: Val -> String
+prettyVal v = case v of
+  IntVal i      -> show i
+  FloatVal d    -> show d
+  BoolVal True  -> "true"
+  BoolVal False -> "false"
+  StringVal s   -> show s
+  UnitVal       -> "()"
+  ListVal vs    -> "[" ++ intercalate "; " (map prettyVal vs) ++ "]"
 
 --------------------------------------------------------------------------------------
 --
@@ -407,7 +468,7 @@ replEval (LetStmt x e) (sigma, gamma) =
 
 replPretty :: Either String Result -> String
 replPretty (Left err) = err
-replPretty (Right (ty, v)) = show v ++ " : " ++ show ty
+replPretty (Right (ty, v)) = prettyVal v ++ " : " ++ prettyPolytype ty
 
 replPrint :: Either String Result -> IO ()
 replPrint = putStrLn . replPretty
